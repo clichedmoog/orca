@@ -10,7 +10,7 @@
 import type { AgentSessionWireRefusal } from '../../../shared/agent-session-wire'
 import { DISPATCH_REJECTED_HOST_RESTARTED } from '../../../shared/structured-agent-session-dispatch-rejection'
 import type { StructuredAgentSessionAdapter } from './structured-agent-session-adapter'
-import type { StructuredAgentSessionResumeOutcome } from './structured-agent-session-hold-resume'
+import type { StructuredAgentSessionResumeOutcome } from './structured-agent-session-agent-start'
 import type { StructuredAgentSessionHostSession } from './structured-agent-session-host-types'
 import {
   oldestQueuedSubmission,

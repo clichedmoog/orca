@@ -57,7 +57,8 @@ describe('a conversation delivers what its journal commits', () => {
     const deliver = vi.fn()
     const conversations = new StructuredAgentSessionConversations({
       deliver,
-      onDeliveryError: vi.fn()
+      onDeliveryError: vi.fn(),
+      now: () => 0
     })
     const journal = await openJournal('a')
     conversations.set('session-1', session(journal))
@@ -73,7 +74,11 @@ describe('a conversation delivers what its journal commits', () => {
     const deliver = vi.fn()
     // Collaborators hold the host's map as a plain `Map`; `set` still reaches the binding.
     const sessions: Map<string, StructuredAgentSessionHostSession> =
-      new StructuredAgentSessionConversations({ deliver, onDeliveryError: vi.fn() })
+      new StructuredAgentSessionConversations({
+        deliver,
+        onDeliveryError: vi.fn(),
+        now: () => 0
+      })
     const journal = await openJournal('a')
     sessions.set('session-1', session(journal))
 
@@ -86,7 +91,8 @@ describe('a conversation delivers what its journal commits', () => {
     const deliver = vi.fn()
     const conversations = new StructuredAgentSessionConversations({
       deliver,
-      onDeliveryError: vi.fn()
+      onDeliveryError: vi.fn(),
+      now: () => 0
     })
     const journal = await openJournal('a')
     conversations.set('session-1', session(journal))
@@ -100,7 +106,8 @@ describe('a conversation delivers what its journal commits', () => {
     const deliver = vi.fn()
     const conversations = new StructuredAgentSessionConversations({
       deliver,
-      onDeliveryError: vi.fn()
+      onDeliveryError: vi.fn(),
+      now: () => 0
     })
     const replaced = await openJournal('a')
     const current = await openJournal('b')
@@ -118,7 +125,8 @@ describe('a conversation delivers what its journal commits', () => {
     const deliver = vi.fn()
     const conversations = new StructuredAgentSessionConversations({
       deliver,
-      onDeliveryError: vi.fn()
+      onDeliveryError: vi.fn(),
+      now: () => 0
     })
     const journal = await openJournal('a')
     conversations.set('session-1', session(journal))
@@ -136,7 +144,8 @@ describe('a conversation delivers what its journal commits', () => {
       deliver: () => {
         throw failure
       },
-      onDeliveryError
+      onDeliveryError,
+      now: () => 0
     })
     const journal = await openJournal('a')
     conversations.set('session-1', session(journal))

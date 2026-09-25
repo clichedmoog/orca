@@ -138,7 +138,7 @@ function attachContext(
     reconcileLeases: async () => null,
     serialize: <T>(_sessionId: string, task: () => Promise<T>) => task(),
     now: () => 1,
-    forgetStatus: () => undefined
+    publishStatus: () => undefined
   } as unknown as StructuredAgentSessionAttachContext
 }
 
