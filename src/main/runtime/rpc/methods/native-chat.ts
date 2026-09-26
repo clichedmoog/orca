@@ -1,4 +1,5 @@
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
+import { hydrateNativeChatImageRefs } from '../../../native-chat/transcript-image-cache'
 import {
   readNativeChatTranscriptTail,
   subscribeNativeChatTranscript,
@@ -36,7 +37,7 @@ function sanitizeAppendForClient(
   messages: readonly NativeChatMessage[],
   clientKind: RpcContext['clientKind']
 ): NativeChatMessage[] {
-  return messages.map((message) => sanitizeMessage(message, clientKind))
+  return hydrateNativeChatImageRefs(messages).map((message) => sanitizeMessage(message, clientKind))
 }
 
 /** Window a transcript to its most recent `limit` messages so a long session
@@ -52,15 +53,17 @@ function windowTranscript(
 }
 
 /** Apply the windowed slice and keep inline image bytes off every RPC transport.
- *  Mobile clients additionally receive bounded text and tool bodies; runtime
- *  clients keep those bodies intact. */
+ *  Inline images persist to the host image cache first (after windowing, so only
+ *  shipped turns pay for it) and cross as fetchable path refs. Mobile clients
+ *  additionally receive bounded text and tool bodies; runtime clients keep those
+ *  bodies intact. */
 function windowForClient(
   messages: readonly NativeChatMessage[],
   clientKind: RpcContext['clientKind'],
   limit = MOBILE_NATIVE_CHAT_DEFAULT_WINDOW
 ): NativeChatMessage[] {
   const windowed = windowTranscript(messages, limit)
-  return windowed.map((message) => sanitizeMessage(message, clientKind))
+  return hydrateNativeChatImageRefs(windowed).map((message) => sanitizeMessage(message, clientKind))
 }
 
 export const NATIVE_CHAT_METHODS = [

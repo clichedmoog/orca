@@ -82,10 +82,10 @@ function isInlineImageRef(block: NativeChatBlock): block is NativeChatImageRefBl
  * Fail-open: anything unparseable, oversized, or unwritable keeps its inline
  * URL, which desktop still renders (mobile shows its placeholder instead).
  */
-export async function hydrateNativeChatImageRefs(
+export function hydrateNativeChatImageRefs(
   messages: readonly NativeChatMessage[],
   options: { cacheDir?: string } = {}
-): Promise<NativeChatMessage[]> {
+): NativeChatMessage[] {
   if (!messages.some((message) => message.blocks.some(isInlineImageRef))) {
     return [...messages]
   }
