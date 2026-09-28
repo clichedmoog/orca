@@ -7,7 +7,8 @@ import type { NativeChatMessage } from '../../shared/native-chat-types'
 import { supportsPosixFileModes } from '../daemon/daemon-private-file-modes'
 import {
   hydrateNativeChatImageRefs,
-  NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES
+  NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES,
+  readNativeChatCachedImage
 } from './transcript-image-cache'
 
 const PNG_1PX =
@@ -97,5 +98,65 @@ describe('hydrateNativeChatImageRefs', () => {
     const bad = 'data:image/png;base64,%%%not-base64%%%'
     const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(bad)], { cacheDir })
     expect(hydrated.blocks[1]).toEqual({ type: 'image-ref', url: bad })
+  })
+})
+
+describe('readNativeChatCachedImage', () => {
+  async function hydratedPath(cacheDir: string, url = DATA_URL): Promise<string> {
+    const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(url)], { cacheDir })
+    const ref = hydrated.blocks[1]
+    if (ref.type !== 'image-ref' || !ref.path) {
+      throw new Error('expected a hydrated path ref')
+    }
+    return ref.path
+  }
+
+  it('reads a hydrated entry back as a base64 image preview', async () => {
+    const cacheDir = freshCacheDir()
+    const path = await hydratedPath(cacheDir)
+    await expect(
+      readNativeChatCachedImage(path, { cacheDir, maxBytes: NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES })
+    ).resolves.toEqual({
+      content: PNG_1PX,
+      isBinary: true,
+      isImage: true,
+      mimeType: 'image/png'
+    })
+  })
+
+  it('keeps the webp extension and mime type instead of relabeling it png', async () => {
+    const cacheDir = freshCacheDir()
+    const path = await hydratedPath(cacheDir, `data:image/webp;base64,${PNG_1PX}`)
+    expect(path).toMatch(/\.webp$/)
+    const image = await readNativeChatCachedImage(path, { cacheDir, maxBytes: 1024 })
+    expect(image.mimeType).toBe('image/webp')
+  })
+
+  it('refuses anything that is not a content-hash file directly in the cache dir', async () => {
+    const cacheDir = freshCacheDir()
+    const path = await hydratedPath(cacheDir)
+    const name = path.slice(cacheDir.length + 1)
+    const elsewhere = freshCacheDir()
+    writeFileSync(join(elsewhere, name), 'x')
+    writeFileSync(join(cacheDir, 'notes.png'), 'x')
+    for (const candidate of [
+      join(elsewhere, name),
+      join(cacheDir, 'notes.png'),
+      join(cacheDir, 'sub', '..', '..', name),
+      join(cacheDir, `${'0'.repeat(64)}.png`),
+      '/etc/passwd'
+    ]) {
+      await expect(
+        readNativeChatCachedImage(candidate, { cacheDir, maxBytes: 1024 })
+      ).rejects.toThrow('image_not_found')
+    }
+  })
+
+  it('reports an entry over the byte limit as too large', async () => {
+    const cacheDir = freshCacheDir()
+    const path = await hydratedPath(cacheDir)
+    await expect(readNativeChatCachedImage(path, { cacheDir, maxBytes: 8 })).rejects.toThrow(
+      'file_too_large'
+    )
   })
 })

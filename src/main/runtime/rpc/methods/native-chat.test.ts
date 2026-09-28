@@ -824,38 +824,3 @@ describe('nativeChat.readSession lifecycle payload', () => {
     expect((result as { messages: NativeChatMessage[] }).messages).toHaveLength(1)
   })
 })
-
-describe('nativeChat.readSession image hydration', () => {
-  it('persists inline screenshot bytes and ships a cache path ref', async () => {
-    const cacheDir = mkdtempSync(join(tmpdir(), 'nnc-rpc-img-'))
-    setNativeChatImageCacheDirForTests(cacheDir)
-    try {
-      const data =
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-      cachedResult.value = {
-        messages: [
-          {
-            id: 'shot-1',
-            role: 'assistant',
-            timestamp: 1_717_236_000_000,
-            source: 'transcript',
-            blocks: [{ type: 'image-ref', url: `data:image/png;base64,${data}` }]
-          }
-        ]
-      }
-      const result = await readSessionHandler()(
-        { agent: 'claude', sessionId: 's' },
-        ctxWith('mobile')
-      )
-      const [block] = (result as { messages: NativeChatMessage[] }).messages[0].blocks
-      if (block?.type !== 'image-ref' || !block.path) {
-        throw new Error('expected a hydrated image-ref path')
-      }
-      expect(block.url).toBeUndefined()
-      expect(block.path.startsWith(cacheDir)).toBe(true)
-      expect(readFileSync(block.path).toString('base64')).toBe(data)
-    } finally {
-      setNativeChatImageCacheDirForTests(undefined)
-    }
-  })
-})

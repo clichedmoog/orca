@@ -37,6 +37,7 @@ import type { MobileChatPermission } from './mobile-native-chat-permission'
 import type { MobileChatQuestion } from './mobile-native-chat-question'
 import type { MobileNativeChatSessionOptionPickersProps } from './MobileNativeChatSessionOptionPickers'
 import { MobileNativeChatMessage } from './MobileNativeChatMessage'
+import type { NativeChatImageLoad } from './mobile-native-chat-host-image'
 import type { MobileNativeChatStatus } from './use-mobile-native-chat-session'
 
 /** Why the composer input is locked: the transport is disconnected, or the
@@ -130,6 +131,8 @@ type Props = {
   onRespondPermission?: (send: string) => Promise<boolean>
   /** Open a worktree file tapped in agent markdown. */
   onOpenFile?: (relativePath: string) => void
+  /** Fetches agent screenshots the host cached; absent while disconnected. */
+  loadImage?: NativeChatImageLoad
   /** Pixels to lift the composer by when the soft keyboard is open. The route
    *  owns keyboard tracking (the app uses manual lift, not KeyboardAvoidingView). */
   keyboardInset?: number
@@ -186,6 +189,7 @@ export function MobileNativeChatView({
   permission,
   onRespondPermission,
   onOpenFile,
+  loadImage,
   keyboardInset = 0
 }: Props): React.JSX.Element {
   const insets = useSafeAreaInsets()
@@ -279,12 +283,13 @@ export function MobileNativeChatView({
         toolsExpanded={toolsExpanded}
         fontScale={fontScale}
         onOpenFile={onOpenFile}
+        loadImage={loadImage}
         structuredActivityUi={structuredActivityUi}
         onToggleTurn={turns.onToggleTurn}
         {...turns.resolveRow(index, item)}
       />
     ),
-    [toolsExpanded, fontScale, onOpenFile, structuredActivityUi, turns]
+    [toolsExpanded, fontScale, onOpenFile, loadImage, structuredActivityUi, turns]
   )
 
   const emptyState = mobileNativeChatEmptyState(status, agent ?? null, error)

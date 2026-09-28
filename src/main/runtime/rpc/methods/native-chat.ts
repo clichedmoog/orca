@@ -1,5 +1,13 @@
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
-import { hydrateNativeChatImageRefs } from '../../../native-chat/transcript-image-cache'
+import {
+  hydrateNativeChatImageRefs,
+  NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES,
+  readNativeChatCachedImage
+} from '../../../native-chat/transcript-image-cache'
+import {
+  assertPreviewWithinTransportBudget,
+  previewableBinaryByteLimit
+} from '../../runtime-file-preview-transport-budget'
 import {
   readNativeChatTranscriptTail,
   subscribeNativeChatTranscript,
@@ -7,9 +15,11 @@ import {
   type SubscribeNativeChatTranscriptArgs
 } from '../../../native-chat/transcript-watch'
 import { defineMethod, defineStreamingMethod, type RpcContext } from '../core'
+import { remoteFileContentBudget } from './files-remote-content-budget'
 import { sanitizeNativeChatRpcBlock } from './native-chat-rpc-block-sanitize'
 import {
   MOBILE_NATIVE_CHAT_MAX_WINDOW,
+  NativeChatReadImage,
   NativeChatSession,
   NativeChatUnsubscribe
 } from '../../../../shared/rpc-contract/native-chat-params'
@@ -209,6 +219,19 @@ export const NATIVE_CHAT_METHODS = [
         })
       }
       unsubscribe = subscription.unsubscribe
+    }
+  }),
+  defineMethod({
+    name: 'nativeChat.readImage',
+    params: NativeChatReadImage,
+    handler: async (params, { clientKind, requestId }) => {
+      const budget = remoteFileContentBudget(clientKind, requestId)
+      const maxBytes = Math.min(
+        NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES,
+        budget === undefined ? Infinity : previewableBinaryByteLimit(budget)
+      )
+      const image = await readNativeChatCachedImage(params.path, { maxBytes })
+      return assertPreviewWithinTransportBudget(image, budget)
     }
   }),
   defineMethod({
