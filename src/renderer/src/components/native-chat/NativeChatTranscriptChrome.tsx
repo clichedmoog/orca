@@ -187,7 +187,7 @@ export function NativeChatImageAttachments({
 }: {
   blocks: NativeChatBlock[]
   runtimeContext?: RuntimeFileOperationArgs | null
-  /** Keep legacy terminal chips unchanged until that lane opts into previews. */
+  /** Host-file previews stay chips in the terminal lane; inline and remote images always preview. */
   enablePreview?: boolean
 }): React.JSX.Element | null {
   const images = blocks.filter((block) => block.type === 'image-ref')

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, linkSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { getAppEnvironment } from '../../shared/app-environment'
 import type {
@@ -93,6 +94,27 @@ function isInlineImageRef(block: NativeChatBlock): block is NativeChatImageRefBl
   return block.type === 'image-ref' && /^\s*data:/i.test(block.url ?? '')
 }
 
+// Entries are derived from transcripts, so an evicted one is simply rewritten on the next read.
+export const NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+const prunedCacheDirs = new Set<string>()
+
+/** Drop entries (and orphaned temp files) untouched for the retention window. */
+export async function pruneNativeChatImageCache(cacheDir: string, now = Date.now()): Promise<void> {
+  for (const name of await readdir(cacheDir)) {
+    if (!CACHE_FILE_NAME.test(name) && !name.endsWith('.tmp')) {
+      continue
+    }
+    const filePath = join(cacheDir, name)
+    try {
+      if (now - (await stat(filePath)).mtimeMs > NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS) {
+        await rm(filePath, { force: true })
+      }
+    } catch {
+      // Raced with another reader's write or removal; the next process start retries.
+    }
+  }
+}
+
 /**
  * Persist inline (data:) image bytes to the host image cache and rewrite the
  * refs to cache paths. Content-hash naming makes writes idempotent across
@@ -109,6 +131,10 @@ export function hydrateNativeChatImageRefs(
   }
   const cacheDir = options.cacheDir ?? defaultCacheDir()
   ensurePrivateDir(cacheDir)
+  if (!prunedCacheDirs.has(cacheDir)) {
+    prunedCacheDirs.add(cacheDir)
+    void pruneNativeChatImageCache(cacheDir).catch(() => {})
+  }
   return messages.map((message) => {
     if (!message.blocks.some(isInlineImageRef)) {
       return message
@@ -146,8 +172,16 @@ function publishCacheEntry(filePath: string, bytes: Buffer): void {
     try {
       linkSync(tempPath, filePath)
     } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
-        throw error
+      if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+        return
+      }
+      // No hard links on this volume: rename is still atomic, and a same-name entry holds the same bytes.
+      try {
+        renameSync(tempPath, filePath)
+      } catch (renameError) {
+        if (!existsSync(filePath)) {
+          throw renameError
+        }
       }
     }
   } finally {

@@ -77,4 +77,17 @@ describe('NativeChatHostImageLoader', () => {
     await expect(loader.load(CACHED)).resolves.toBeNull()
     await expect(loader.load(CACHED)).resolves.toBe('data:image/png;base64,BBBB')
   })
+
+  it('does not re-ask for an image the host refused as too large', async () => {
+    const sendRequest = vi.fn().mockResolvedValue({
+      id: 'img',
+      ok: false,
+      error: { code: 'runtime_error', message: 'file_too_large' },
+      _meta: { runtimeId: 'r' }
+    })
+    const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
+    await expect(loader.load(CACHED)).resolves.toBeNull()
+    await expect(loader.load(CACHED)).resolves.toBeNull()
+    expect(sendRequest).toHaveBeenCalledTimes(1)
+  })
 })

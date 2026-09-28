@@ -1,23 +1,33 @@
 import { createHash } from 'node:crypto'
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
+import type * as NodeFs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { NativeChatMessage } from '../../shared/native-chat-types'
 import { supportsPosixFileModes } from '../daemon/daemon-private-file-modes'
 import {
   hydrateNativeChatImageRefs,
   NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES,
+  NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS,
+  pruneNativeChatImageCache,
   readNativeChatCachedImage
 } from './transcript-image-cache'
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>()
+  return { ...actual, linkSync: vi.fn(actual.linkSync) }
+})
 
 const PNG_1PX =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -99,6 +109,20 @@ describe('hydrateNativeChatImageRefs', () => {
     const [second] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
     expect(second.blocks[1]).toEqual(ref)
     expect(readFileSync(ref.path).toString('base64')).toBe(PNG_1PX)
+  })
+
+  it('falls back to rename where the volume has no hard links', async () => {
+    vi.mocked(linkSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+    })
+    const cacheDir = freshCacheDir()
+    const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    const ref = hydrated.blocks[1]
+    if (ref.type !== 'image-ref' || !ref.path) {
+      throw new Error('expected a hydrated path ref despite the link failure')
+    }
+    expect(readFileSync(ref.path).toString('base64')).toBe(PNG_1PX)
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.tmp'))).toEqual([])
   })
 
   it('passes remote urls and existing paths through untouched', async () => {
@@ -185,5 +209,27 @@ describe('readNativeChatCachedImage', () => {
     await expect(readNativeChatCachedImage(path, { cacheDir, maxBytes: 8 })).rejects.toThrow(
       'file_too_large'
     )
+  })
+})
+
+describe('pruneNativeChatImageCache', () => {
+  it('drops entries and temp files past retention and keeps everything else', async () => {
+    const cacheDir = freshCacheDir()
+    const old = (NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS + 60_000) / 1000
+    const now = Date.now()
+    const stale = join(cacheDir, `${'a'.repeat(64)}.png`)
+    const fresh = join(cacheDir, `${'b'.repeat(64)}.png`)
+    const orphanTemp = join(cacheDir, `${'c'.repeat(64)}.png.x.tmp`)
+    const unrelated = join(cacheDir, 'notes.txt')
+    for (const file of [stale, fresh, orphanTemp, unrelated]) {
+      writeFileSync(file, 'x')
+    }
+    for (const file of [stale, orphanTemp, unrelated]) {
+      utimesSync(file, now / 1000 - old, now / 1000 - old)
+    }
+
+    await pruneNativeChatImageCache(cacheDir, now)
+
+    expect(readdirSync(cacheDir).sort()).toEqual([`${'b'.repeat(64)}.png`, 'notes.txt'])
   })
 })

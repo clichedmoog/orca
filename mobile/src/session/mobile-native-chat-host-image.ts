@@ -50,6 +50,10 @@ export class NativeChatHostImageLoader {
         if (!response.ok && response.error.code === 'method_not_found') {
           this.unsupported = true
         }
+        // An image over the transport budget stays over it; keep the null so remounts don't re-ask.
+        if (!response.ok && response.error.message.includes('file_too_large')) {
+          return null
+        }
         // A transient refusal (dropped link, busy host) may succeed on a later render.
         this.images.delete(path)
         return null
