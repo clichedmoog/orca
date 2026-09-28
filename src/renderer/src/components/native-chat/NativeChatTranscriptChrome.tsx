@@ -203,6 +203,16 @@ export function NativeChatImageAttachments({
           const imageKeyBase = `${label}-${image.url ?? ''}-${image.path ?? ''}`
           const occurrence = imageKeyCounts.get(imageKeyBase) ?? 0
           imageKeyCounts.set(imageKeyBase, occurrence + 1)
+          // Inline and remote images need no host file access, so they preview in this lane too.
+          if (renderableImageSource(image.url?.trim() || image.path)) {
+            return (
+              <TranscriptImagePreview
+                key={`${imageKeyBase}-${occurrence}`}
+                block={image}
+                runtimeContext={runtimeContext}
+              />
+            )
+          }
           const name =
             image.path && isNativeChatPastedImagePath(image.path)
               ? translate('components.native-chat.composer.pastedImageLabel', 'Pasted image')

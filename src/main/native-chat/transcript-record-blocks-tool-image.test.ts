@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { decodeClaudeTranscriptLine } from './transcript-line-decoders-claude'
 import { claudeContentBlocks } from './transcript-record-blocks'
 
 // Agent-taken screenshots ride inside tool_result content as Anthropic image
@@ -68,5 +69,19 @@ describe('tool_result image promotion', () => {
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }
     ])
     expect(blocks).toEqual([{ type: 'text', text: 'look [Image #1]' }])
+  })
+})
+
+describe('tool_result screenshot records', () => {
+  it('decode as tool output, not a user bubble', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      uuid: 'u-1',
+      timestamp: '2026-09-29T00:00:00.000Z',
+      message: { role: 'user', content: TOOL_RESULT_WITH_SCREENSHOT }
+    })
+    const decoded = decodeClaudeTranscriptLine(line, 'fallback')
+    expect(decoded?.role).toBe('tool')
+    expect(decoded?.blocks.map((block) => block.type)).toEqual(['tool-result', 'image-ref'])
   })
 })
