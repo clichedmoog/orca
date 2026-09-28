@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
-import { existsSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, linkSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { getAppEnvironment } from '../../shared/app-environment'
 import type {
@@ -115,26 +115,70 @@ export function hydrateNativeChatImageRefs(
     }
     return {
       ...message,
-      blocks: message.blocks.map((block) => hydrateBlock(block, cacheDir))
+      blocks: message.blocks.map((block, index) =>
+        hydrateBlock(block, cacheDir, `${cacheDir}\0${message.id}\0${index}`)
+      )
     }
   })
 }
 
-function hydrateBlock(block: NativeChatBlock, cacheDir: string): NativeChatBlock {
+// Why: every snapshot, replacement and append re-reads the same screenshots; remembering
+// where a transcript block already landed skips re-decoding and re-hashing megabytes each time.
+const MAX_HYDRATED_REFS = 256
+const hydratedRefPaths = new Map<string, string>()
+
+function rememberHydratedRef(key: string, filePath: string): void {
+  hydratedRefPaths.delete(key)
+  hydratedRefPaths.set(key, filePath)
+  if (hydratedRefPaths.size > MAX_HYDRATED_REFS) {
+    const oldest = hydratedRefPaths.keys().next().value
+    if (oldest !== undefined) {
+      hydratedRefPaths.delete(oldest)
+    }
+  }
+}
+
+/** Write-once publish: a crash mid-write leaves only a temp file, never a truncated entry. */
+function publishCacheEntry(filePath: string, bytes: Buffer): void {
+  const tempPath = `${filePath}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(tempPath, bytes, { mode: PRIVATE_FILE_MODE })
+    try {
+      linkSync(tempPath, filePath)
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
+        throw error
+      }
+    }
+  } finally {
+    rmSync(tempPath, { force: true })
+  }
+}
+
+function hydrateBlock(block: NativeChatBlock, cacheDir: string, refKey: string): NativeChatBlock {
   if (!isInlineImageRef(block)) {
     return block
   }
   try {
-    const parsed = parseInlineImage(block.url ?? '')
+    const url = block.url ?? ''
+    // Transcript records are immutable, so length plus tail is enough to catch a reused id.
+    const memoKey = `${refKey}\0${url.length}\0${url.slice(-64)}`
+    const remembered = hydratedRefPaths.get(memoKey)
+    if (remembered && existsSync(remembered)) {
+      rememberHydratedRef(memoKey, remembered)
+      return { type: 'image-ref', path: remembered, ...(block.alt ? { alt: block.alt } : {}) }
+    }
+    const parsed = parseInlineImage(url)
     if (!parsed) {
       return block
     }
     const digest = createHash('sha256').update(parsed.bytes).digest('hex')
     const filePath = join(cacheDir, `${digest}.${extensionForMimeType(parsed.mimeType)}`)
     if (!existsSync(filePath)) {
-      writeFileSync(filePath, parsed.bytes, { mode: PRIVATE_FILE_MODE })
+      publishCacheEntry(filePath, parsed.bytes)
     }
     tightenPathMode(filePath, PRIVATE_FILE_MODE)
+    rememberHydratedRef(memoKey, filePath)
     return {
       type: 'image-ref',
       path: filePath,

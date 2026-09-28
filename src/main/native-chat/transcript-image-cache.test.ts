@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -72,6 +80,25 @@ describe('hydrateNativeChatImageRefs', () => {
     }
     expect(ref.path).toBe(cached)
     expect(readFileSync(cached, 'utf8')).toBe('stale-bytes')
+  })
+
+  it('publishes the entry whole and leaves no temp file behind', async () => {
+    const cacheDir = freshCacheDir()
+    await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.tmp'))).toEqual([])
+  })
+
+  it('rewrites a remembered entry whose cache file was removed', async () => {
+    const cacheDir = freshCacheDir()
+    const [first] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    const ref = first.blocks[1]
+    if (ref.type !== 'image-ref' || !ref.path) {
+      throw new Error('expected a hydrated path ref')
+    }
+    rmSync(ref.path)
+    const [second] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    expect(second.blocks[1]).toEqual(ref)
+    expect(readFileSync(ref.path).toString('base64')).toBe(PNG_1PX)
   })
 
   it('passes remote urls and existing paths through untouched', async () => {
