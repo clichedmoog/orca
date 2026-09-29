@@ -97,6 +97,8 @@ function isInlineImageRef(block: NativeChatBlock): block is NativeChatImageRefBl
 // Entries are derived from transcripts, so an evicted one is simply rewritten on the next read.
 export const NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const prunedCacheDirs = new Set<string>()
+// Paths this process has handed to clients; pruning never removes one of them.
+const servedCachePaths = new Set<string>()
 
 /** Drop entries (and orphaned temp files) untouched for the retention window. */
 export async function pruneNativeChatImageCache(cacheDir: string, now = Date.now()): Promise<void> {
@@ -106,7 +108,9 @@ export async function pruneNativeChatImageCache(cacheDir: string, now = Date.now
     }
     const filePath = join(cacheDir, name)
     try {
-      if (now - (await stat(filePath)).mtimeMs > NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS) {
+      const stale = now - (await stat(filePath)).mtimeMs > NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS
+      // Checked after the await: hydration may have handed this path to a client meanwhile.
+      if (stale && !servedCachePaths.has(filePath)) {
         await rm(filePath, { force: true })
       }
     } catch {
@@ -130,7 +134,12 @@ export function hydrateNativeChatImageRefs(
     return [...messages]
   }
   const cacheDir = options.cacheDir ?? defaultCacheDir()
-  ensurePrivateDir(cacheDir)
+  try {
+    ensurePrivateDir(cacheDir)
+  } catch {
+    // An unwritable cache must not take the transcript down; the refs stay inline.
+    return [...messages]
+  }
   if (!prunedCacheDirs.has(cacheDir)) {
     prunedCacheDirs.add(cacheDir)
     void pruneNativeChatImageCache(cacheDir).catch(() => {})
@@ -200,6 +209,7 @@ function hydrateBlock(block: NativeChatBlock, cacheDir: string, refKey: string):
     const remembered = hydratedRefPaths.get(memoKey)
     if (remembered && existsSync(remembered)) {
       rememberHydratedRef(memoKey, remembered)
+      servedCachePaths.add(remembered)
       return { type: 'image-ref', path: remembered, ...(block.alt ? { alt: block.alt } : {}) }
     }
     const parsed = parseInlineImage(url)
@@ -213,6 +223,7 @@ function hydrateBlock(block: NativeChatBlock, cacheDir: string, refKey: string):
     }
     tightenPathMode(filePath, PRIVATE_FILE_MODE)
     rememberHydratedRef(memoKey, filePath)
+    servedCachePaths.add(filePath)
     return {
       type: 'image-ref',
       path: filePath,

@@ -1,8 +1,12 @@
-import { describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { act, create, type ReactTestRenderer } from 'react-test-renderer'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcClient } from '../transport/rpc-client'
 import {
   isNativeChatCachedImagePath,
-  NativeChatHostImageLoader
+  NativeChatHostImageLoader,
+  useNativeChatHostImage,
+  type NativeChatImageLoad
 } from './mobile-native-chat-host-image'
 
 const HASH = 'a'.repeat(64)
@@ -47,8 +51,8 @@ describe('NativeChatHostImageLoader', () => {
     const sendRequest = vi.fn().mockResolvedValue(imageReply('AAAA'))
     const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
     const [first, second] = await Promise.all([loader.load(CACHED), loader.load(CACHED)])
-    expect(first).toBe('data:image/png;base64,AAAA')
-    expect(second).toBe(first)
+    expect(first).toEqual({ uri: 'data:image/png;base64,AAAA' })
+    expect(second).toEqual(first)
     expect(sendRequest).toHaveBeenCalledTimes(1)
     expect(sendRequest.mock.calls[0][0]).toBe('nativeChat.readImage')
   })
@@ -56,15 +60,18 @@ describe('NativeChatHostImageLoader', () => {
   it('never asks the host for a path outside its image cache', async () => {
     const sendRequest = vi.fn()
     const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
-    await expect(loader.load('/tmp/pasted.png')).resolves.toBeNull()
+    await expect(loader.load('/tmp/pasted.png')).resolves.toEqual({ uri: null, retry: false })
     expect(sendRequest).not.toHaveBeenCalled()
   })
 
   it('stops asking a host that predates nativeChat.readImage', async () => {
     const sendRequest = vi.fn().mockResolvedValue(failure('method_not_found'))
     const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
-    await expect(loader.load(CACHED)).resolves.toBeNull()
-    await expect(loader.load(CACHED.replace('.png', '.jpg'))).resolves.toBeNull()
+    await expect(loader.load(CACHED)).resolves.toEqual({ uri: null, retry: false })
+    await expect(loader.load(CACHED.replace('.png', '.jpg'))).resolves.toEqual({
+      uri: null,
+      retry: false
+    })
     expect(sendRequest).toHaveBeenCalledTimes(1)
   })
 
@@ -74,8 +81,8 @@ describe('NativeChatHostImageLoader', () => {
       .mockResolvedValueOnce(failure('runtime_unavailable'))
       .mockResolvedValueOnce(imageReply('BBBB'))
     const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
-    await expect(loader.load(CACHED)).resolves.toBeNull()
-    await expect(loader.load(CACHED)).resolves.toBe('data:image/png;base64,BBBB')
+    await expect(loader.load(CACHED)).resolves.toEqual({ uri: null, retry: true })
+    await expect(loader.load(CACHED)).resolves.toEqual({ uri: 'data:image/png;base64,BBBB' })
   })
 
   it('does not re-ask for an image the host refused as too large', async () => {
@@ -86,8 +93,56 @@ describe('NativeChatHostImageLoader', () => {
       _meta: { runtimeId: 'r' }
     })
     const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
-    await expect(loader.load(CACHED)).resolves.toBeNull()
-    await expect(loader.load(CACHED)).resolves.toBeNull()
+    await expect(loader.load(CACHED)).resolves.toEqual({ uri: null, retry: false })
+    await expect(loader.load(CACHED)).resolves.toEqual({ uri: null, retry: false })
     expect(sendRequest).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('useNativeChatHostImage', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('re-asks a still-mounted row after a transient refusal', async () => {
+    vi.useFakeTimers()
+    const load = vi
+      .fn<NativeChatImageLoad>()
+      .mockResolvedValueOnce({ uri: null, retry: true })
+      .mockResolvedValueOnce({ uri: 'data:image/png;base64,CCCC' })
+    let uri: string | null = null
+    function Harness(): null {
+      uri = useNativeChatHostImage(CACHED, load)
+      return null
+    }
+    let renderer: ReactTestRenderer | null = null
+    await act(async () => {
+      renderer = create(createElement(Harness))
+    })
+    expect(uri).toBeNull()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(uri).toBe('data:image/png;base64,CCCC')
+    act(() => renderer?.unmount())
+  })
+
+  it('does not re-ask after a settled refusal', async () => {
+    vi.useFakeTimers()
+    const load = vi.fn<NativeChatImageLoad>().mockResolvedValue({ uri: null, retry: false })
+    function Harness(): null {
+      useNativeChatHostImage(CACHED, load)
+      return null
+    }
+    let renderer: ReactTestRenderer | null = null
+    await act(async () => {
+      renderer = create(createElement(Harness))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+    expect(load).toHaveBeenCalledTimes(1)
+    act(() => renderer?.unmount())
   })
 })

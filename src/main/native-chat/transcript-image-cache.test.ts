@@ -125,6 +125,16 @@ describe('hydrateNativeChatImageRefs', () => {
     expect(readdirSync(cacheDir).filter((name) => name.endsWith('.tmp'))).toEqual([])
   })
 
+  it('leaves refs inline instead of failing when the cache dir cannot be created', async () => {
+    const blocker = join(freshCacheDir(), 'not-a-dir')
+    writeFileSync(blocker, 'x')
+    const message = messageWithUrl(DATA_URL)
+    const hydrated = await hydrateNativeChatImageRefs([message], {
+      cacheDir: join(blocker, 'native-chat-images')
+    })
+    expect(hydrated).toEqual([message])
+  })
+
   it('passes remote urls and existing paths through untouched', async () => {
     const cacheDir = freshCacheDir()
     const remote = messageWithUrl('https://x.test/shot.png')
@@ -231,5 +241,21 @@ describe('pruneNativeChatImageCache', () => {
     await pruneNativeChatImageCache(cacheDir, now)
 
     expect(readdirSync(cacheDir).sort()).toEqual([`${'b'.repeat(64)}.png`, 'notes.txt'])
+  })
+
+  it('keeps an old entry this process just handed to a client', async () => {
+    const cacheDir = freshCacheDir()
+    const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    const ref = hydrated.blocks[1]
+    if (ref.type !== 'image-ref' || !ref.path) {
+      throw new Error('expected a hydrated path ref')
+    }
+    const now = Date.now()
+    const old = (NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS + 60_000) / 1000
+    utimesSync(ref.path, now / 1000 - old, now / 1000 - old)
+
+    await pruneNativeChatImageCache(cacheDir, now)
+
+    expect(existsSync(ref.path)).toBe(true)
   })
 })

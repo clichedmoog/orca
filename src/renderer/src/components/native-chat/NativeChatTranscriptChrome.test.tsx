@@ -225,4 +225,21 @@ describe('NativeChatImageAttachments', () => {
     expect(container.textContent).not.toContain('base64')
     root.unmount()
   })
+
+  it('keeps a remote image a chip in the chip-only lane, so no request leaves the app', async () => {
+    const container = document.createElement('div')
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        createElement(NativeChatImageAttachments, {
+          blocks: [{ type: 'image-ref' as const, url: 'https://x.test/shot.png' }],
+          enablePreview: false
+        })
+      )
+      await flushPromises()
+    })
+
+    expect(container.querySelector('img')).toBeNull()
+    root.unmount()
+  })
 })

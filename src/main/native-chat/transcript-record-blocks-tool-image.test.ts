@@ -27,7 +27,7 @@ describe('tool_result image promotion', () => {
     ])
   })
 
-  it('keeps url-sourced images as url refs', () => {
+  it('drops url-sourced images so chat never fetches an agent-chosen host', () => {
     const blocks = claudeContentBlocks([
       {
         type: 'tool_result',
@@ -35,10 +35,7 @@ describe('tool_result image promotion', () => {
         content: [{ type: 'image', source: { type: 'url', url: 'https://x.test/shot.png' } }]
       }
     ])
-    expect(blocks).toEqual([
-      { type: 'tool-result', output: '' },
-      { type: 'image-ref', url: 'https://x.test/shot.png' }
-    ])
+    expect(blocks).toEqual([{ type: 'tool-result', output: '' }])
   })
 
   it('leaves text-only tool results unchanged', () => {

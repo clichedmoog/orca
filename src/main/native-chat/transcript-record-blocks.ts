@@ -127,10 +127,7 @@ function toolResultBlocks(record: Record<string, unknown>): NativeChatBlock[] {
 
 function toolImageRef(part: Record<string, unknown>): NativeChatImageRefBlock | null {
   const source = asRecord(part.source)
-  const url = extractString(source?.url) ?? extractString(part.url)
-  if (url && !/^\s*data:/i.test(url)) {
-    return { type: 'image-ref', url }
-  }
+  // Only inline bytes promote: a remote URL here would make chat fetch an agent-chosen host.
   if (source?.type === 'base64') {
     const mediaType = extractString(source.media_type)
     const data = extractString(source.data)
