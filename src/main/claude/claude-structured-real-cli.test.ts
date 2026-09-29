@@ -1,55 +1,31 @@
-import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { AgentSessionJournalIdentity } from '../../shared/agent-session-journal-types'
-import { resolveClaudeCommand } from '../codex-cli/command'
 import { resolveSessionFilePath } from '../native-chat/session-file-resolver'
-import { getSpawnArgsForWindows } from '../win32-utils'
 import { CLAUDE_STRUCTURED_BASE_OPTIONS } from './claude-structured-launch-resolution'
+import {
+  realClaudeAuthenticated,
+  realClaudeAuthStatus,
+  realClaudeAvailable,
+  realClaudeCommand
+} from './claude-real-cli-availability-test-support'
 import {
   ClaudeStructuredSessionAdapter,
   type ClaudeStructuredSessionEvent
 } from './claude-structured-session-adapter'
+import type { ClaudeStructuredSessionAdapterDeps } from './claude-structured-session-state'
 
-const command = resolveClaudeCommand()
-const versionLaunch = getSpawnArgsForWindows(command, ['--version'])
-const realClaudeAvailable =
-  spawnSync(versionLaunch.spawnCmd, versionLaunch.spawnArgs, {
-    stdio: 'ignore',
-    windowsHide: true,
-    timeout: 5_000
-  }).status === 0
-const authStatusLaunch = getSpawnArgsForWindows(command, ['auth', 'status', '--json'])
-/** The CLI's own account report — the only source of truth for where it writes that
- *  is not derived from Orca's own path expressions. */
-const realClaudeAuthStatus = (() => {
-  if (!realClaudeAvailable) {
-    return null
-  }
-  const result = spawnSync(authStatusLaunch.spawnCmd, authStatusLaunch.spawnArgs, {
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 5_000
-  })
-  if (result.status !== 0) {
-    return null
-  }
-  try {
-    return JSON.parse(result.stdout) as { loggedIn?: boolean; projectsDirectory?: string }
-  } catch {
-    return null
-  }
-})()
-const realClaudeAuthenticated = realClaudeAuthStatus?.loggedIn === true
+const command = realClaudeCommand
 
 function realAdapter(
   providerSessionId: string,
   claudeConfigDir: string,
   events: ClaudeStructuredSessionEvent[] = [],
-  cwd = process.cwd()
+  cwd = process.cwd(),
+  onDispatchSettledLate?: ClaudeStructuredSessionAdapterDeps['onDispatchSettledLate']
 ): ClaudeStructuredSessionAdapter {
   const adapter = new ClaudeStructuredSessionAdapter({
     resolveLaunch: async () => ({
@@ -63,6 +39,7 @@ function realAdapter(
       continuesChain: false
     }),
     onEvent: (event) => events.push(event),
+    ...(onDispatchSettledLate ? { onDispatchSettledLate } : {}),
     readProcessStartTime: async () => 1,
     now: () => 2
   })
@@ -300,6 +277,87 @@ describe.skipIf(!realClaudeAvailable)('Claude structured real CLI handshake', ()
       }
     },
     90_000
+  )
+
+  // Orca installs a SessionStart hook, so its frame proves most real starts before the turn's
+  // system/init, the only frame that says this CLI can cancel what it queued.
+  it.skipIf(!realClaudeAuthenticated)(
+    'withdraws a follow-up queued behind a turn that is stopped, behind a SessionStart hook',
+    async () => {
+      const providerSessionId = randomUUID()
+      const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
+      const cwd = await mkdtemp(join(tmpdir(), 'orca-queued-stop-'))
+      await mkdir(join(cwd, '.claude'), { recursive: true })
+      await writeFile(
+        join(cwd, '.claude', 'settings.json'),
+        JSON.stringify({
+          hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'true' }] }] }
+        })
+      )
+      const events: ClaudeStructuredSessionEvent[] = []
+      const settlements: unknown[] = []
+      const adapter = realAdapter(providerSessionId, claudeConfigDir, events, cwd, (settlement) =>
+        settlements.push(settlement)
+      )
+      const send = (clientMessageId: string, text: string) =>
+        adapter.dispatch({
+          sessionId: 'real-cli-handshake',
+          clientMessageId,
+          body: { kind: 'message', role: 'user', blocks: [{ type: 'text', text }] },
+          fence: 1
+        })
+      const waitFor = async (found: () => boolean): Promise<boolean> => {
+        const deadline = Date.now() + 60_000
+        while (!found() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        return found()
+      }
+
+      try {
+        await adapter.acquire({
+          identity: identity(providerSessionId),
+          fence: 1,
+          spawnToken: 'real-cli-queued-stop'
+        })
+        await send('real-cli-queued-stop-a', 'Count from 1 to 400, one number per line.')
+        // A's reply is streaming, so the next send queues behind its turn.
+        await expect(
+          waitFor(() =>
+            events.some(
+              (event) =>
+                event.type === 'message' &&
+                event.message.type === 'stream_event' &&
+                JSON.stringify(event.message).includes('text_delta')
+            )
+          )
+        ).resolves.toBe(true)
+        await send('real-cli-queued-stop-b', 'Say the word banana.')
+
+        await expect(
+          adapter.cancelTurn({
+            sessionId: 'real-cli-handshake',
+            turnId: 'turn-a',
+            fence: 1,
+            resolveLiveTurnId: () => 'turn-a',
+            // What the host reads for B: handed over, not yet answered.
+            dispatchStatus: { state: 'pending', recovered: false }
+          })
+        ).resolves.toEqual({ cancelled: true })
+
+        expect(settlements).toContainEqual({
+          sessionId: 'real-cli-handshake',
+          clientMessageId: 'real-cli-queued-stop-b',
+          state: 'rejected',
+          reason: 'provider_cancelled_before_start',
+          rejection: { kind: 'cancelled' }
+        })
+      } finally {
+        await adapter.closeAll()
+        await rm(cwd, { recursive: true, force: true })
+      }
+    },
+    150_000
   )
 
   it('turns a real silent unauthenticated startup into sign-in guidance', async () => {

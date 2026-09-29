@@ -1138,6 +1138,7 @@ export const RPC_PARAMS_BY_METHOD = {
   'terminal.read': TerminalRead,
   'terminal.recoverPane': TerminalRecoverPane,
   'terminal.rename': TerminalRename,
+  'terminal.resetInputModes': TerminalHandle,
   'terminal.resizeForClient': TerminalResizeForClient,
   'terminal.resolveActive': TerminalResolveActive,
   'terminal.resolveIdentity': TerminalHandle,

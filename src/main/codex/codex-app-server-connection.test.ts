@@ -11,7 +11,11 @@ import {
   type CodexAppServerConnection,
   type CodexAppServerConnectionHandlers
 } from './codex-app-server-connection'
+import { PROVIDER_SUPERVISOR_MAX_STOP_MS } from './codex-app-server-posix-supervisor'
 import { isCodexAppServerUnsupportedError } from './codex-app-server-session'
+
+// close() waits out the supervisor's own stop before forcing the tree.
+const GRACEFUL_EXIT_MS = process.platform === 'win32' ? 1_500 : PROVIDER_SUPERVISOR_MAX_STOP_MS
 
 const originalCodexHome = process.env.CODEX_HOME
 
@@ -392,7 +396,7 @@ describe('openCodexAppServerConnection', () => {
       openCodexAppServerConnection({ command: 'codex', args: ['app-server'] }, {}, spawnImpl)
     )
 
-    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(GRACEFUL_EXIT_MS + 3_500)
     const error = (await opening) as Error & { connection?: CodexAppServerConnection }
 
     expect(error.name).toBe('CodexAppServerHandshakeExitUnprovenError')
@@ -434,7 +438,7 @@ describe('openCodexAppServerConnection', () => {
     })
 
     const closing = connection.close()
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(GRACEFUL_EXIT_MS + 500)
     await closing
 
     await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGKILL'))
@@ -468,7 +472,7 @@ describe('openCodexAppServerConnection', () => {
 
     const first = connection.close()
     const second = connection.close()
-    await vi.advanceTimersByTimeAsync(4_100)
+    await vi.advanceTimersByTimeAsync(GRACEFUL_EXIT_MS + 2_600)
 
     await expect(Promise.all([first, second])).resolves.toEqual([true, true])
     expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGSTOP', 'SIGKILL'])
@@ -485,7 +489,7 @@ describe('openCodexAppServerConnection', () => {
     )
 
     const first = connection.close()
-    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(GRACEFUL_EXIT_MS + 3_500)
     await expect(first).resolves.toBe(false)
     child.emit('exit', 0, null)
 
@@ -576,6 +580,36 @@ describe('openCodexAppServerConnection', () => {
     const followup = connection.request('turn/start')
     child.stdout.write('{"id":3,"result":{"turn":{"id":"turn-next"}}}\n')
     await expect(followup).resolves.toEqual({ turn: { id: 'turn-next' } })
+    await connection.close()
+  })
+
+  it('delivers a notification beyond the daemon wire limit whole, never as an oversized frame', async () => {
+    const { child, spawnImpl } = stubChild()
+    answerInitialize(child)
+    const frames: string[] = []
+    const deltas: unknown[] = []
+    const connection = await openCodexAppServerConnection(
+      { command: 'codex', args: ['app-server'] },
+      {
+        onUnhandledFrame: (kind) => frames.push(kind),
+        onNotification: (method, params) => {
+          if (method === 'item/commandExecution/outputDelta') {
+            deltas.push(params)
+          }
+        }
+      },
+      spawnImpl
+    )
+
+    const params = { threadId: 'thread-1', itemId: 'exec-1', delta: '' }
+    params.delta = 'x'.repeat(16 * 1024 * 1024 + 1)
+    child.stdout.write(
+      `${JSON.stringify({ method: 'item/commandExecution/outputDelta', params })}\n`
+    )
+
+    await vi.waitFor(() => expect(deltas).toEqual([params]))
+    expect(frames).toEqual([])
+    expect(connection.closed).toBe(false)
     await connection.close()
   })
 

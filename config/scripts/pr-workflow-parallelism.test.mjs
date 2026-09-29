@@ -28,6 +28,7 @@ const shellContractFiles = [
   'src/main/zsh-scoped-histfile.live-shell.test.ts',
   'src/main/zsh-startup-hook-user-config-equivalence.live-shell.test.ts',
   'src/main/zsh-wrapper-version-mismatch.live-shell.test.ts',
+  'src/main/runtime/structured-session-cli-login-shell.live-shell.test.ts',
   'src/shared/posix-command-path-lookup.test.ts'
 ]
 const patchedNodePtyContractFiles = [
@@ -46,7 +47,7 @@ const testFilePatterns = [
 // rather than calling spawnSync('zsh') themselves. Without this branch the rule
 // silently stops noticing the very tests that need the lane's zsh install.
 const realZshUsage =
-  /(?:spawnSync|execFileSync|spawn)\(\s*['"](?:\/(?:usr\/)?bin\/)?zsh['"]|spawnSync\(\s*['"]which['"]\s*,\s*\[\s*['"]zsh['"]|name:\s*['"]zsh['"]\s*,\s*path:\s*executablePath|from '[^']*zsh-startup-hook-pty-harness'/
+  /(?:spawnSync|execFileSync|spawn)\(\s*['"](?:\/(?:usr\/)?bin\/)?zsh['"]|program:\s*['"](?:\/(?:usr\/)?bin\/)?zsh['"]|spawnSync\(\s*['"]which['"]\s*,\s*\[\s*['"]zsh['"]|name:\s*['"]zsh['"]\s*,\s*path:\s*executablePath|from '[^']*zsh-startup-hook-pty-harness'/
 
 describe('PR workflow parallelism', () => {
   it('keeps lightweight orchestration jobs on the free slim runner', () => {
@@ -106,8 +107,12 @@ describe('PR workflow parallelism', () => {
     expect(nodeNextWorkflow.on.schedule).toHaveLength(1)
     expect(nodeNextWorkflow.on.workflow_dispatch).toBeNull()
     expect(sharedTest.strategy.matrix.node).toBe('${{ fromJSON(inputs.node_versions) }}')
-    expect(sharedTest.strategy.matrix.shard).toBe('${{ fromJSON(needs.plan.outputs.shards) }}')
-    expect(sharedTest.needs).toBe('plan')
+    expect(sharedTest.strategy.matrix.shard).toBe('${{ fromJSON(inputs.shards) }}')
+    // The shard matrix no longer needs an in-workflow plan job: planning moved to
+    // unit-plan.yml so it can run before the static-analysis gate clears.
+    expect(sharedTest.needs).toBeUndefined()
+    expect(unitTestWorkflow.jobs.plan).toBeUndefined()
+    expect(unitTestWorkflow.on.workflow_call.inputs.shards.required).toBe(true)
     expect(installStep.with['node-version']).toBe('${{ matrix.node }}')
     expect(installStep.with['cache-electron-package']).toBe('true')
     expect(testStep.run).toContain('--shard=${{ matrix.shard.index }}/${{ matrix.shard.count }}')
@@ -119,7 +124,7 @@ describe('PR workflow parallelism', () => {
     expect(workflow.jobs.test.needs).toContain('test_native_cache')
     expect(nodeNextPrimerInstall.with['native-runtime']).toBe('node')
     expect(nodeNextPrimerInstall.with['node-version']).toBe('${{ matrix.node }}')
-    expect(nodeNextWorkflow.jobs.test.needs).toEqual(['test_native_cache'])
+    expect(nodeNextWorkflow.jobs.test.needs).toEqual(['test_native_cache', 'unit_plan'])
   })
 
   it('runs real-shell coverage once outside the general shards', () => {
@@ -494,6 +499,22 @@ describe('PR workflow parallelism', () => {
     for (const checkout of fullHistoryCheckouts) {
       expect(checkout.with.filter).toBe('blob:none')
     }
+  })
+
+  it('keeps advisory unit-selection evidence off the gate', () => {
+    // It is continue-on-error, so it can never fail a PR. Living inside unit-tests.yml made a
+    // caller's `needs: test` wait for it anyway, holding verify ~36s past the last shard. Pinned
+    // here so it cannot drift back onto the critical path.
+    const evidence = workflow.jobs.unit_selection_evidence
+    expect(evidence.uses).toBe('./.github/workflows/unit-selection-evidence.yml')
+    expect(evidence.needs).toEqual(['test'])
+    expect(workflow.jobs.verify.needs).not.toContain('unit_selection_evidence')
+    expect(unitTestWorkflow.jobs.selection_evidence).toBeUndefined()
+    const evidenceWorkflow = parse(
+      readFileSync('.github/workflows/unit-selection-evidence.yml', 'utf8')
+    )
+    const job = evidenceWorkflow.jobs.selection_evidence
+    expect(job['continue-on-error']).toBe(true)
   })
 
   it('keeps verify as the aggregate required check', () => {

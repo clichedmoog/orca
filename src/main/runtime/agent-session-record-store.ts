@@ -25,7 +25,6 @@ import {
   retireAgentSessionClaimKey
 } from './agent-session-claim-key-retention'
 import type { AgentSessionOwnerProbe } from '../../shared/agent-session-lease-adjudication'
-import { classifyObservedAgentSessionSpawnToken } from '../../shared/agent-session-lease-adjudication'
 import type { AgentSessionProviderHandleLink } from '../../shared/agent-session-provider-handle'
 import {
   agentSessionScopeKey,
@@ -78,6 +77,8 @@ export const AGENT_SESSION_LEASE_TTL_MS = 30_000,
   AGENT_SESSION_LEASE_RENEW_INTERVAL_MS = 10_000
 
 export class AgentSessionRecordStore {
+  private readonly deathEvidenceListeners = new Set<(sessionId: string) => void>()
+
   private constructor(private readonly transactions: AgentSessionStoreTransactionQueue) {}
 
   static async open(args: { directory: string; hostId: string }): Promise<AgentSessionRecordStore> {
@@ -179,14 +180,6 @@ export class AgentSessionRecordStore {
 
   isClaimKeyVerifiable = (keyId: string, now: number): boolean =>
     isAgentSessionClaimKeyVerifiable(this.state, keyId, now)
-
-  /** Spawn tokens observed on the host with no matching lease. Stop them; never adopt them. */
-  listOrphanSpawnTokens(observedTokens: readonly string[]): string[] {
-    const leases = this.listRecords().map((record) => record.lease)
-    return observedTokens.filter(
-      (spawnToken) => classifyObservedAgentSessionSpawnToken({ spawnToken, leases }) === 'orphan'
-    )
-  }
 
   async reserveOwner(request: AgentSessionReserveRequest): Promise<AgentSessionReserveResult> {
     return this.transact(() =>
@@ -337,6 +330,32 @@ export class AgentSessionRecordStore {
     })
   }
 
+  /** Told, once committed, of each session a transaction wrote a proof of death for — whichever
+   *  transition wrote it, since every one lands here. Must not throw. */
+  onDeathEvidence(listener: (sessionId: string) => void): () => void {
+    this.deathEvidenceListeners.add(listener)
+    return () => this.deathEvidenceListeners.delete(listener)
+  }
+
   /** Serialize every mutation against the latest committed disk state. */
-  private transact = <T>(apply: () => T): Promise<T> => this.transactions.transact(apply)
+  private transact = async <T>(apply: () => T): Promise<T> => {
+    let proven: string[] = []
+    const result = await this.transactions.transact(() => {
+      if (this.deathEvidenceListeners.size === 0) {
+        return apply()
+      }
+      const before = new Map(
+        [...this.state.records].map(([id, record]) => [id, record.lease.deathEvidence])
+      )
+      const applied = apply()
+      proven = [...this.state.records]
+        .filter(([id, { lease }]) => lease.deathEvidence && lease.deathEvidence !== before.get(id))
+        .map(([id]) => id)
+      return applied
+    })
+    for (const sessionId of proven) {
+      this.deathEvidenceListeners.forEach((listener) => listener(sessionId))
+    }
+    return result
+  }
 }
