@@ -99,6 +99,24 @@ describe('NativeChatHostImageLoader', () => {
   })
 })
 
+describe('NativeChatHostImageLoader byte budget', () => {
+  it('evicts the least-recent image once the cached data exceeds the byte budget', async () => {
+    const big = 'A'.repeat(10 * 1024 * 1024)
+    const sendRequest = vi.fn().mockResolvedValue(imageReply(big))
+    const loader = new NativeChatHostImageLoader(fakeClient(sendRequest))
+    const paths = ['1', '2', '3'].map((n) => CACHED.replace(HASH, n.repeat(64)))
+    for (const path of paths) {
+      await loader.load(path)
+    }
+    expect(sendRequest).toHaveBeenCalledTimes(3)
+
+    await loader.load(paths[2])
+    expect(sendRequest).toHaveBeenCalledTimes(3)
+    await loader.load(paths[0])
+    expect(sendRequest).toHaveBeenCalledTimes(4)
+  })
+})
+
 describe('useNativeChatHostImage', () => {
   afterEach(() => {
     vi.useRealTimers()

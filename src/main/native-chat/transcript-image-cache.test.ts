@@ -19,8 +19,10 @@ import { supportsPosixFileModes } from '../daemon/daemon-private-file-modes'
 import {
   hydrateNativeChatImageRefs,
   NATIVE_CHAT_IMAGE_CACHE_MAX_BYTES,
+  NATIVE_CHAT_IMAGE_CACHE_PRUNE_INTERVAL_MS,
   NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS,
   pruneNativeChatImageCache,
+  pruneNativeChatImageCacheIfDue,
   readNativeChatCachedImage
 } from './transcript-image-cache'
 
@@ -243,19 +245,35 @@ describe('pruneNativeChatImageCache', () => {
     expect(readdirSync(cacheDir).sort()).toEqual([`${'b'.repeat(64)}.png`, 'notes.txt'])
   })
 
-  it('keeps an old entry this process just handed to a client', async () => {
+  it('keeps an old entry that hydration just served, because serving refreshes it', async () => {
     const cacheDir = freshCacheDir()
-    const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
-    const ref = hydrated.blocks[1]
-    if (ref.type !== 'image-ref' || !ref.path) {
-      throw new Error('expected a hydrated path ref')
-    }
+    const digest = createHash('sha256').update(Buffer.from(PNG_1PX, 'base64')).digest('hex')
+    const cached = join(cacheDir, `${digest}.png`)
+    writeFileSync(cached, Buffer.from(PNG_1PX, 'base64'))
     const now = Date.now()
     const old = (NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS + 60_000) / 1000
-    utimesSync(ref.path, now / 1000 - old, now / 1000 - old)
+    utimesSync(cached, now / 1000 - old, now / 1000 - old)
 
+    const [hydrated] = await hydrateNativeChatImageRefs([messageWithUrl(DATA_URL)], { cacheDir })
+    expect(hydrated.blocks[1]).toEqual({ type: 'image-ref', path: cached })
     await pruneNativeChatImageCache(cacheDir, now)
 
-    expect(existsSync(ref.path)).toBe(true)
+    expect(existsSync(cached)).toBe(true)
+  })
+
+  it('prunes again once the interval has passed, not on every read', async () => {
+    const cacheDir = freshCacheDir()
+    const now = Date.now()
+    expect(pruneNativeChatImageCacheIfDue(cacheDir, now)).not.toBeNull()
+    expect(pruneNativeChatImageCacheIfDue(cacheDir, now + 60_000)).toBeNull()
+    const later = now + NATIVE_CHAT_IMAGE_CACHE_PRUNE_INTERVAL_MS + 1
+    const stale = join(cacheDir, `${'d'.repeat(64)}.png`)
+    writeFileSync(stale, 'x')
+    const old = (NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS + 60_000) / 1000
+    utimesSync(stale, later / 1000 - old, later / 1000 - old)
+
+    await pruneNativeChatImageCacheIfDue(cacheDir, later)
+
+    expect(existsSync(stale)).toBe(false)
   })
 })

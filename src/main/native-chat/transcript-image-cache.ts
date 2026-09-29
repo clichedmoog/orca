@@ -1,6 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, linkSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { readdir, rm, stat } from 'node:fs/promises'
+import {
+  existsSync,
+  linkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { getAppEnvironment } from '../../shared/app-environment'
 import type {
@@ -96,9 +104,10 @@ function isInlineImageRef(block: NativeChatBlock): block is NativeChatImageRefBl
 
 // Entries are derived from transcripts, so an evicted one is simply rewritten on the next read.
 export const NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
-const prunedCacheDirs = new Set<string>()
-// Paths this process has handed to clients; pruning never removes one of them.
-const servedCachePaths = new Set<string>()
+export const NATIVE_CHAT_IMAGE_CACHE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
+// Serving an entry refreshes its mtime at most this often, which is what keeps it out of pruning.
+const TOUCH_INTERVAL_MS = 24 * 60 * 60 * 1000
+const lastPrunedAt = new Map<string, number>()
 
 /** Drop entries (and orphaned temp files) untouched for the retention window. */
 export async function pruneNativeChatImageCache(cacheDir: string, now = Date.now()): Promise<void> {
@@ -106,17 +115,31 @@ export async function pruneNativeChatImageCache(cacheDir: string, now = Date.now
     if (!CACHE_FILE_NAME.test(name) && !name.endsWith('.tmp')) {
       continue
     }
+    await new Promise((resolveYield) => setImmediate(resolveYield))
     const filePath = join(cacheDir, name)
     try {
-      const stale = now - (await stat(filePath)).mtimeMs > NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS
-      // Checked after the await: hydration may have handed this path to a client meanwhile.
-      if (stale && !servedCachePaths.has(filePath)) {
-        await rm(filePath, { force: true })
+      // Stat and remove in one tick: hydration touches an entry before serving it, so it
+      // cannot slip between this check and the removal.
+      if (now - statSync(filePath).mtimeMs > NATIVE_CHAT_IMAGE_CACHE_RETENTION_MS) {
+        rmSync(filePath, { force: true })
       }
     } catch {
-      // Raced with another reader's write or removal; the next process start retries.
+      // Raced with another reader's write or removal; the next run retries.
     }
   }
+}
+
+/** Starts a prune when this dir has not had one within the interval; returns it, or null. */
+export function pruneNativeChatImageCacheIfDue(
+  cacheDir: string,
+  now = Date.now()
+): Promise<void> | null {
+  const last = lastPrunedAt.get(cacheDir)
+  if (last !== undefined && now - last < NATIVE_CHAT_IMAGE_CACHE_PRUNE_INTERVAL_MS) {
+    return null
+  }
+  lastPrunedAt.set(cacheDir, now)
+  return pruneNativeChatImageCache(cacheDir, now).catch(() => {})
 }
 
 /**
@@ -140,10 +163,7 @@ export function hydrateNativeChatImageRefs(
     // An unwritable cache must not take the transcript down; the refs stay inline.
     return [...messages]
   }
-  if (!prunedCacheDirs.has(cacheDir)) {
-    prunedCacheDirs.add(cacheDir)
-    void pruneNativeChatImageCache(cacheDir).catch(() => {})
-  }
+  void pruneNativeChatImageCacheIfDue(cacheDir)
   return messages.map((message) => {
     if (!message.blocks.some(isInlineImageRef)) {
       return message
@@ -160,17 +180,27 @@ export function hydrateNativeChatImageRefs(
 // Why: every snapshot, replacement and append re-reads the same screenshots; remembering
 // where a transcript block already landed skips re-decoding and re-hashing megabytes each time.
 const MAX_HYDRATED_REFS = 256
-const hydratedRefPaths = new Map<string, string>()
+const hydratedRefPaths = new Map<string, { path: string; touchedAt: number }>()
 
-function rememberHydratedRef(key: string, filePath: string): void {
+function rememberHydratedRef(key: string, filePath: string, touchedAt: number): void {
   hydratedRefPaths.delete(key)
-  hydratedRefPaths.set(key, filePath)
+  hydratedRefPaths.set(key, { path: filePath, touchedAt })
   if (hydratedRefPaths.size > MAX_HYDRATED_REFS) {
     const oldest = hydratedRefPaths.keys().next().value
     if (oldest !== undefined) {
       hydratedRefPaths.delete(oldest)
     }
   }
+}
+
+function touchCacheEntry(filePath: string, now: number): number {
+  const seconds = now / 1000
+  try {
+    utimesSync(filePath, seconds, seconds)
+  } catch {
+    // Best effort: an untouched entry is only pruned early and rewritten on the next read.
+  }
+  return now
 }
 
 /** Write-once publish: a crash mid-write leaves only a temp file, never a truncated entry. */
@@ -207,10 +237,14 @@ function hydrateBlock(block: NativeChatBlock, cacheDir: string, refKey: string):
     // Transcript records are immutable, so length plus tail is enough to catch a reused id.
     const memoKey = `${refKey}\0${url.length}\0${url.slice(-64)}`
     const remembered = hydratedRefPaths.get(memoKey)
-    if (remembered && existsSync(remembered)) {
-      rememberHydratedRef(memoKey, remembered)
-      servedCachePaths.add(remembered)
-      return { type: 'image-ref', path: remembered, ...(block.alt ? { alt: block.alt } : {}) }
+    if (remembered && existsSync(remembered.path)) {
+      const now = Date.now()
+      const touchedAt =
+        now - remembered.touchedAt > TOUCH_INTERVAL_MS
+          ? touchCacheEntry(remembered.path, now)
+          : remembered.touchedAt
+      rememberHydratedRef(memoKey, remembered.path, touchedAt)
+      return { type: 'image-ref', path: remembered.path, ...(block.alt ? { alt: block.alt } : {}) }
     }
     const parsed = parseInlineImage(url)
     if (!parsed) {
@@ -218,12 +252,14 @@ function hydrateBlock(block: NativeChatBlock, cacheDir: string, refKey: string):
     }
     const digest = createHash('sha256').update(parsed.bytes).digest('hex')
     const filePath = join(cacheDir, `${digest}.${extensionForMimeType(parsed.mimeType)}`)
-    if (!existsSync(filePath)) {
+    const now = Date.now()
+    if (existsSync(filePath)) {
+      touchCacheEntry(filePath, now)
+    } else {
       publishCacheEntry(filePath, parsed.bytes)
     }
     tightenPathMode(filePath, PRIVATE_FILE_MODE)
-    rememberHydratedRef(memoKey, filePath)
-    servedCachePaths.add(filePath)
+    rememberHydratedRef(memoKey, filePath, now)
     return {
       type: 'image-ref',
       path: filePath,

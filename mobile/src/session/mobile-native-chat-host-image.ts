@@ -5,6 +5,8 @@ import { nativeChatImageRead } from './mobile-session-read-operations'
 // Mirrors the host cache's content-hash file names; any other host path is not fetchable.
 const CACHED_IMAGE_NAME = /(?:^|[\\/])[0-9a-f]{64}\.(?:png|jpg|gif|webp|bmp|ico)$/
 const MAX_CACHED_IMAGES = 16
+// Count alone let sixteen large screenshots pin tens of MB; rows keep their own copy once drawn.
+const MAX_CACHED_URI_CHARS = 24 * 1024 * 1024
 
 export function isNativeChatCachedImagePath(path: string | undefined): path is string {
   return typeof path === 'string' && CACHED_IMAGE_NAME.test(path)
@@ -23,6 +25,8 @@ const RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
  *  that predates `nativeChat.readImage`. */
 export class NativeChatHostImageLoader {
   private readonly images = new Map<string, Promise<NativeChatImageLoadResult>>()
+  private readonly uriChars = new Map<string, number>()
+  private totalUriChars = 0
   private unsupported = false
 
   constructor(private readonly client: RpcClient) {}
@@ -40,13 +44,33 @@ export class NativeChatHostImageLoader {
     }
     const pending = this.fetch(path)
     this.images.set(path, pending)
-    if (this.images.size > MAX_CACHED_IMAGES) {
-      const oldest = this.images.keys().next().value
-      if (oldest !== undefined) {
-        this.images.delete(oldest)
+    this.evict(path)
+    void pending.then((result) => {
+      if (result.uri && this.images.get(path) === pending) {
+        this.uriChars.set(path, result.uri.length)
+        this.totalUriChars += result.uri.length
+        this.evict(path)
+      }
+    })
+    return pending
+  }
+
+  private forget(path: string): void {
+    this.images.delete(path)
+    this.totalUriChars -= this.uriChars.get(path) ?? 0
+    this.uriChars.delete(path)
+  }
+
+  /** Drop least-recent entries past either bound; `keep` (the one just asked for) always stays. */
+  private evict(keep: string): void {
+    for (const path of this.images.keys()) {
+      if (this.images.size <= MAX_CACHED_IMAGES && this.totalUriChars <= MAX_CACHED_URI_CHARS) {
+        return
+      }
+      if (path !== keep) {
+        this.forget(path)
       }
     }
-    return pending
   }
 
   private async fetch(path: string): Promise<NativeChatImageLoadResult> {
@@ -62,7 +86,7 @@ export class NativeChatHostImageLoader {
         if (!response.ok && response.error.message.includes('file_too_large')) {
           return SETTLED
         }
-        this.images.delete(path)
+        this.forget(path)
         return TRANSIENT
       }
       const { content, mimeType, isImage } = accepted.value
@@ -71,7 +95,7 @@ export class NativeChatHostImageLoader {
       }
       return { uri: `data:${mimeType};base64,${content}` }
     } catch {
-      this.images.delete(path)
+      this.forget(path)
       return TRANSIENT
     }
   }
